@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/http"
+	"strconv" // Added for Atoi
 
 	// Keep for os.Exit or other non-file uses if any; not strictly needed for this refactor
 	// Keep for Atoi if it were used elsewhere; not strictly needed for this refactor
@@ -83,6 +84,36 @@ func handleGetUsers(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	query := r.URL.Query()
+	idParam := query.Get("id")
+
+	if idParam != "" {
+		// Attempt to find a single user by ID
+		targetID, err := strconv.Atoi(idParam)
+		if err != nil {
+			http.Error(w, "Invalid user ID format", http.StatusBadRequest)
+			return
+		}
+
+		// Still reads from the global, potentially racy 'users' slice
+		// Linear search, inefficient for large N
+		foundUser := false
+		for _, user := range users {
+			if user.ID == targetID {
+				fmt.Fprintf(w, "User:\nID: %d, Name: %s, Email: %s\n", user.ID, user.Name, user.Email)
+				foundUser = true
+				break
+			}
+		}
+
+		if !foundUser {
+			http.Error(w, fmt.Sprintf("User with ID %d not found", targetID), http.StatusNotFound)
+		}
+		return
+	}
+
+	// If no ID parameter, return all users
 	// Still reads from the global, potentially racy 'users' slice
 	fmt.Fprintf(w, "Users:\n")
 	for _, user := range users {
@@ -173,4 +204,5 @@ func main() {
 			db.Close()
 		}
 	}
+
 }

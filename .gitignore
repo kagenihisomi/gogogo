@@ -33,3 +33,9 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Air live reload
+tmp/
+# .air.toml # Add this if you don't want to commit air's config file
+air_errors.log # Default error log file for air
+users.db
