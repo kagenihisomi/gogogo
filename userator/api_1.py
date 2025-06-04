@@ -55,6 +55,9 @@ def get_db_connection():
     """
     db = sqlite3.connect(DATABASE_URL)
     db.row_factory = sqlite3.Row  # Access columns by name
+    # Optimize for write performance
+    db.execute("PRAGMA journal_mode = WAL;")
+    db.execute("PRAGMA synchronous = NORMAL;")
     try:
         yield db  # This is what gets injected into your path operation functions
     finally:
@@ -97,13 +100,6 @@ def add_user(
     - **email**: User's email (required, must be unique)
     - **age**: User's age (optional, defaults to 0)
     """
-    # Check for existing email (similar to Go's logic, but more explicit error)
-    cursor_check = db.execute("SELECT id FROM users WHERE email = ?", (user_in.email,))
-    if cursor_check.fetchone():
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Email '{user_in.email}' already exists",
-        )
     try:
         cursor = db.execute(
             "INSERT INTO users (name, email, age) VALUES (?, ?, ?)",
@@ -115,7 +111,21 @@ def add_user(
         return UserResponse(
             id=created_user_id, name=user_in.name, email=user_in.email, age=user_in.age
         )
-    except sqlite3.Error as e:  # Catch specific SQLite errors
+    except sqlite3.IntegrityError as e:  # Catch UNIQUE constraint violation
+        db.rollback()
+        if "UNIQUE constraint failed: users.email" in str(e):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Email '{user_in.email}' already exists.",
+            )
+        else:
+            # Log other IntegrityErrors if necessary
+            print(f"Database IntegrityError on add_user: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="A database integrity error occurred.",
+            )
+    except sqlite3.Error as e:  # Catch other SQLite errors
         db.rollback()
         # Log the error e
         print(f"Database error on add_user: {e}")
@@ -130,15 +140,27 @@ def add_user(
 def get_users(
     user_id: Optional[int] = Query(
         None, description="Optional ID of the user to retrieve"
-    ),  # Query parameter
-    db: sqlite3.Connection = Depends(get_db_connection),  # Dependency Injection
+    ),
+    skip: int = Query(
+        0,
+        ge=0,
+        description="Offset: Number of items to skip for pagination when listing all users.",
+    ),
+    limit: int = Query(
+        10,
+        ge=1,
+        le=100,
+        description="Limit: Maximum number of items to return per page when listing all users.",
+    ),
+    db: sqlite3.Connection = Depends(get_db_connection),
 ):
     """
     Retrieve users.
-    - If **user_id** is provided, retrieves a specific user.
-    - Otherwise, retrieves a list of all users.
+    - If **user_id** is provided, retrieves a specific user (skip and limit are ignored).
+    - Otherwise, retrieves a list of all users using skip/limit pagination.
     """
     if user_id is not None:
+        # Logic for fetching a single user by ID
         cursor = db.execute(
             "SELECT id, name, email, age FROM users WHERE id = ?", (user_id,)
         )
@@ -148,11 +170,14 @@ def get_users(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"User with ID {user_id} not found",
             )
-        return [
-            UserResponse.model_validate(dict(user_row))
-        ]  # Return as a list with one item for consistency or adjust response_model
+        # Return as a list with one item for consistency with response_model=List[UserResponse]
+        # Or, you could have a separate endpoint for single user that returns UserResponse directly
+        return [UserResponse.model_validate(dict(user_row))]
     else:
-        cursor = db.execute("SELECT id, name, email, age FROM users")
+        # Logic for fetching all users with LIMIT/OFFSET pagination
+        # ORDER BY is crucial for consistent pagination
+        query = "SELECT id, name, email, age FROM users ORDER BY id LIMIT ? OFFSET ?"
+        cursor = db.execute(query, (limit, skip))
         users_rows = cursor.fetchall()
         return [UserResponse.model_validate(dict(row)) for row in users_rows]
 
