@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv" // Added for Atoi
 
@@ -40,13 +41,14 @@ func init() {
 	// db.Close() should be called on shutdown, but we're keeping bad practices
 
 	createTableSQL := `CREATE TABLE IF NOT EXISTS users (
-		"id" INTEGER PRIMARY KEY,
+		"id" INTEGER PRIMARY KEY AUTOINCREMENT,
 		"name" TEXT,
-		"email" TEXT
+		"email" TEXT,
+		"age" INTEGER DEFAULT 0 -- Added age column with default value
 	);`
 	_, err = db.Exec(createTableSQL)
 	if err != nil {
-		fmt.Println("Error creating table:", err) // Just print
+		log.Fatalf("Failed to create table: %v", err) // Log fatal, but still not a good practice
 		return
 	}
 
@@ -131,8 +133,13 @@ func handleAddUser(w http.ResponseWriter, r *http.Request) {
 	name := query.Get("name")
 	email := query.Get("email")
 
+	// Validate name and email parameters
 	if name == "" || email == "" {
 		http.Error(w, "Name and Email are required", http.StatusBadRequest)
+		return
+	}
+	if len(query) != 2 {
+		http.Error(w, "Invalid parameters: only name and email are allowed.", http.StatusBadRequest)
 		return
 	}
 
