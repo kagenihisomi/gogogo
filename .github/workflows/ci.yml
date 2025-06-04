@@ -1,0 +1,46 @@
+name: Go Build and Test API
+
+on:
+  push:
+    branches: ["main"] # Or your default branch
+    paths:
+      - "cmd/api/v1/**" # Only run if files in this path change
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/go.yml"
+  pull_request:
+    branches: ["main"] # Or your default branch
+    paths:
+      - "cmd/api/v1/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/go.yml"
+
+jobs:
+  build-and-test-api:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.21" # Specify your Go version
+
+      - name: Run tests
+        run: go test -v ./cmd/api/v1/...
+        # The ./cmd/api/v1/... will run tests in cmd/api/v1 and any subdirectories.
+        # If your tests are only in cmd/api/v1, you can use ./cmd/api/v1
+
+      - name: Build API executable
+        run: go build -v -o myapi_executable ./cmd/api/v1
+        # This builds the package in ./cmd/api/v1
+        # The output will be named 'myapi_executable' in the root of the workspace.
+
+      - name: Upload API executable artifact (optional)
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-v1-executable-${{ runner.os }} # Name of the artifact
+          path: myapi_executable # Path to the file to upload
+          if-no-files-found: error # Fails the step if the executable is not found
