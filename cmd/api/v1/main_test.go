@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -45,46 +47,109 @@ func TestHandleAddUser(t *testing.T) {
 	defer cleanup()
 
 	// Get the handler by calling handleAddUser with the testDB
-	handler := handleAddUser(testDB)
+	// This handler is now part of usersHandlerFunc in main.go,
+	// but for isolated unit testing, we can still test handleAddUser directly.
+	// If you were testing the mux, you'd set up the mux.
+	addUserHandler := handleAddUser(testDB) // Assuming handleAddUser is still accessible for testing
 
 	t.Run("Positive case - add user successfully", func(t *testing.T) {
-		req, err := http.NewRequest("POST", "/add?name=TestUser&email=test@example.com&age=30", nil)
+		userData := User{Name: "TestUser", Email: "test@example.com", Age: 30}
+		payload, _ := json.Marshal(userData)
+		req, err := http.NewRequest("POST", "/users", bytes.NewBuffer(payload))
 		if err != nil {
 			t.Fatal(err)
 		}
-		rr := httptest.NewRecorder()
-		handler.ServeHTTP(rr, req)
+		req.Header.Set("Content-Type", "application/json")
 
-		if status := rr.Code; status != http.StatusOK {
-			t.Errorf("handler returned wrong status code: got %v want %v. Body: %s", status, http.StatusOK, rr.Body.String())
+		rr := httptest.NewRecorder()
+		addUserHandler.ServeHTTP(rr, req)
+
+		if status := rr.Code; status != http.StatusCreated {
+			t.Errorf("handler returned wrong status code: got %v want %v. Body: %s", status, http.StatusCreated, rr.Body.String())
 		}
 
-		body := rr.Body.String()
-		if !strings.Contains(body, "User added:") || !strings.Contains(body, "Name TestUser") || !strings.Contains(body, "Email test@example.com") || !strings.Contains(body, "Age 30") {
-			t.Errorf("handler returned unexpected body: got %q", body)
+		var createdUser User
+		err = json.NewDecoder(rr.Body).Decode(&createdUser)
+		if err != nil {
+			t.Fatalf("Could not decode response body: %v", err)
+		}
+
+		if createdUser.Name != userData.Name || createdUser.Email != userData.Email || createdUser.Age != userData.Age {
+			t.Errorf("handler returned unexpected body: got %+v want name=%s, email=%s, age=%d", createdUser, userData.Name, userData.Email, userData.Age)
+		}
+		if createdUser.ID == 0 {
+			t.Errorf("Expected created user to have an ID, got %d", createdUser.ID)
 		}
 
 		// Verify in DB
 		var name string
-		err = testDB.QueryRow("SELECT name FROM users WHERE email = ?", "test@example.com").Scan(&name)
+		var age int
+		err = testDB.QueryRow("SELECT name, age FROM users WHERE email = ?", "test@example.com").Scan(&name, &age)
 		if err != nil {
 			t.Fatalf("Failed to query test DB: %v", err)
 		}
 		if name != "TestUser" {
 			t.Errorf("Expected name 'TestUser' in DB, got '%s'", name)
 		}
+		if age != 30 {
+			t.Errorf("Expected age 30 in DB, got '%d'", age)
+		}
 	})
 
 	t.Run("Negative case - missing name", func(t *testing.T) {
-		req, err := http.NewRequest("POST", "/add?email=onlyemail@example.com&age=25", nil)
+		userData := map[string]interface{}{"email": "onlyemail@example.com", "age": 25} // Name is missing
+		payload, _ := json.Marshal(userData)
+		req, err := http.NewRequest("POST", "/users", bytes.NewBuffer(payload))
 		if err != nil {
 			t.Fatal(err)
 		}
+		req.Header.Set("Content-Type", "application/json")
+
 		rr := httptest.NewRecorder()
-		handler.ServeHTTP(rr, req)
+		addUserHandler.ServeHTTP(rr, req)
 
 		if status := rr.Code; status != http.StatusBadRequest {
-			t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusBadRequest)
+			t.Errorf("handler returned wrong status code: got %v want %v. Body: %s", status, http.StatusBadRequest, rr.Body.String())
+		}
+		expectedBody := "Name and Email are required\n" // main.go uses http.Error which appends a newline
+		if rr.Body.String() != expectedBody {
+			t.Errorf("handler returned unexpected body: got %q want %q", rr.Body.String(), expectedBody)
+		}
+	})
+
+	t.Run("Negative case - invalid JSON payload (e.g. age as string)", func(t *testing.T) {
+		payload := []byte(`{"name": "BadAge", "email": "badage@example.com", "age": "thirty"}`)
+		req, err := http.NewRequest("POST", "/users", bytes.NewBuffer(payload))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		rr := httptest.NewRecorder()
+		addUserHandler.ServeHTTP(rr, req)
+
+		if status := rr.Code; status != http.StatusBadRequest {
+			t.Errorf("handler returned wrong status code: got %v want %v. Body: %s", status, http.StatusBadRequest, rr.Body.String())
+		}
+		// The exact error message from json.Decode can be a bit verbose or change slightly.
+		// Checking for a key part of it is often sufficient.
+		if !strings.Contains(rr.Body.String(), "Invalid request payload") {
+			t.Errorf("handler returned unexpected body: got %q, expected to contain 'Invalid request payload'", rr.Body.String())
+		}
+	})
+
+	t.Run("Negative case - empty JSON payload", func(t *testing.T) {
+		payload := []byte(`{}`)
+		req, err := http.NewRequest("POST", "/users", bytes.NewBuffer(payload))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		addUserHandler.ServeHTTP(rr, req)
+
+		if status := rr.Code; status != http.StatusBadRequest {
+			t.Errorf("handler returned wrong status code: got %v want %v. Body: %s", status, http.StatusBadRequest, rr.Body.String())
 		}
 		expectedBody := "Name and Email are required\n"
 		if rr.Body.String() != expectedBody {
@@ -92,20 +157,21 @@ func TestHandleAddUser(t *testing.T) {
 		}
 	})
 
-	t.Run("Negative case - invalid age format", func(t *testing.T) {
-		req, err := http.NewRequest("POST", "/add?name=BadAge&email=badage@example.com&age=thirty", nil)
+	t.Run("Negative case - malformed JSON", func(t *testing.T) {
+		payload := []byte(`{"name": "Malformed", "email": "malformed@example.com", "age": 30,`) // Missing closing brace
+		req, err := http.NewRequest("POST", "/users", bytes.NewBuffer(payload))
 		if err != nil {
 			t.Fatal(err)
 		}
+		req.Header.Set("Content-Type", "application/json")
 		rr := httptest.NewRecorder()
-		handler.ServeHTTP(rr, req)
+		addUserHandler.ServeHTTP(rr, req)
 
 		if status := rr.Code; status != http.StatusBadRequest {
-			t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusBadRequest)
+			t.Errorf("handler returned wrong status code: got %v want %v. Body: %s", status, http.StatusBadRequest, rr.Body.String())
 		}
-		expectedBody := "Invalid age format\n"
-		if rr.Body.String() != expectedBody {
-			t.Errorf("handler returned unexpected body: got %q want %q", rr.Body.String(), expectedBody)
+		if !strings.Contains(rr.Body.String(), "Invalid request payload") {
+			t.Errorf("handler returned unexpected body: got %q, expected to contain 'Invalid request payload'", rr.Body.String())
 		}
 	})
 }

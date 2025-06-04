@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json" // Added for JSON handling
 	"fmt"
 	"log"
 	"net/http"
@@ -17,9 +18,6 @@ type User struct {
 	Email string
 	Age   int `json:"age"`
 }
-
-// dbFileName where SQLite data is stored
-const dbFileName = "users.db"
 
 // newDB initializes the database connection and creates the table if it doesn't exist.
 // It returns the database connection pool or an error.
@@ -139,29 +137,20 @@ func handleAddUser(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		query := r.URL.Query()
-		name := query.Get("name")
-		email := query.Get("email")
-		ageStr := query.Get("age") // Assuming age might be passed
-
-		if name == "" || email == "" {
-			http.Error(w, "Name and Email are required", http.StatusBadRequest)
+		var newUser User
+		// Decode JSON from the request body
+		decoder := json.NewDecoder(r.Body)
+		err := decoder.Decode(&newUser)
+		if err != nil {
+			http.Error(w, "Invalid request payload: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		// Basic validation for query parameters count (adjust as needed)
-		// if len(query) < 2 || len(query) > 3 {
-		// 	http.Error(w, "Invalid parameters: name, email, and optional age are allowed.", http.StatusBadRequest)
-		// 	return
-		// }
+		defer r.Body.Close()
 
-		var age int
-		var err error
-		if ageStr != "" {
-			age, err = strconv.Atoi(ageStr)
-			if err != nil {
-				http.Error(w, "Invalid age format", http.StatusBadRequest)
-				return
-			}
+		// Basic validation
+		if newUser.Name == "" || newUser.Email == "" {
+			http.Error(w, "Name and Email are required", http.StatusBadRequest)
+			return
 		}
 
 		// Use the passed-in db instance
@@ -173,7 +162,7 @@ func handleAddUser(db *sql.DB) http.HandlerFunc {
 		}
 		defer stmt.Close()
 
-		result, err := stmt.Exec(name, email, age)
+		result, err := stmt.Exec(newUser.Name, newUser.Email, newUser.Age)
 		if err != nil {
 			log.Printf("Error executing insert statement: %v", err)
 			http.Error(w, "Internal server error (DB exec)", http.StatusInternalServerError)
@@ -183,16 +172,23 @@ func handleAddUser(db *sql.DB) http.HandlerFunc {
 		lastID, err := result.LastInsertId()
 		if err != nil {
 			log.Printf("Error getting last insert ID: %v", err)
-			// User was inserted, but we can't get the ID.
 			http.Error(w, "Internal server error (ID retrieval)", http.StatusInternalServerError)
+			// User was inserted, but we can't get the ID.
+			// Consider how to handle this; maybe still return 201 with a message.
 			return
 		}
-		// Consider returning JSON
-		fmt.Fprintf(w, "User added: ID %d, Name %s, Email %s, Age %d\n", int(lastID), name, email, age)
+
+		newUser.ID = int(lastID) // Assign the generated ID
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)  // 201 Created status
+		json.NewEncoder(w).Encode(newUser) // Respond with the created user as JSON
 	}
 }
 
 func main() {
+	// dbFileName where SQLite data is stored
+	const dbFileName = "users.db"
 	// Initialize database
 	db, err := newDB(dbFileName)
 	if err != nil {
@@ -200,12 +196,23 @@ func main() {
 	}
 	defer db.Close() // Ensure database is closed when main exits
 
-	// Pass the db instance to the handlers
-	http.HandleFunc("/users", handleGetUsers(db))
-	http.HandleFunc("/add", handleAddUser(db))
+	// ...existing code...
+	mux := http.NewServeMux()
+	usersHandlerFunc := func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			handleGetUsers(db)(w, r)
+		} else if r.Method == http.MethodPost {
+			handleAddUser(db)(w, r) // Your existing handleAddUser logic
+		} else {
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		}
+	}
+	mux.HandleFunc("/users", usersHandlerFunc)
+	mux.HandleFunc("/users/", usersHandlerFunc) // Add this line to handle the trailing slash
+	// ...existing code...
 
 	fmt.Println("Server starting on :8080, using SQLite backend.")
-	err = http.ListenAndServe(":8080", nil)
+	err = http.ListenAndServe(":8080", mux) // Use the new mux
 	if err != nil {
 		// http.ListenAndServe always returns a non-nil error.
 		// If it's http.ErrServerClosed, it's a graceful shutdown.
