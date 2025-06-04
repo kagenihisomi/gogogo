@@ -7,14 +7,14 @@ on:
       - "cmd/api/v1/**" # Only run if files in this path change
       - "go.mod"
       - "go.sum"
-      - ".github/workflows/go.yml"
+      - ".github/workflows/**"
   pull_request:
     branches: ["main"] # Or your default branch
     paths:
       - "cmd/api/v1/**"
       - "go.mod"
       - "go.sum"
-      - ".github/workflows/go.yml"
+      - ".github/workflows/**"
 
 jobs:
   build-and-test-api:
