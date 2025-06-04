@@ -1,106 +1,181 @@
-from flask import Flask, request, jsonify
-import os
+import sqlite3
+from typing import List, Optional
+from contextlib import asynccontextmanager  # Import asynccontextmanager
 
-app = Flask(__name__)
+from fastapi import FastAPI, Depends, HTTPException, status, Query
+from pydantic import BaseModel, EmailStr, Field
 
-
-# User class (similar to Go struct)
-class User:
-    def __init__(self, id, name, email):
-        self.id = id
-        self.name = name
-        self.email = email
-
-    def to_dict(self):
-        return {"id": self.id, "name": self.name, "email": self.email}
-
-    def __str__(self):
-        return f"{self.id},{self.name},{self.email}"
+DATABASE_URL = "users.db"
 
 
-# Global variable to store users (similar to Go's global slice)
-users = []
-file_name = "users_python.txt"  # Using a different filename to avoid conflict
+# --- Pydantic Models (Similar to Go's User struct + request/response shaping) ---
+class UserBase(BaseModel):
+    name: str
+    email: EmailStr
+    age: Optional[int] = Field(default=0, ge=0)  # ge=0 for non-negative age
 
 
-# Function to load users from a file
-def load_users_from_file():
-    global users
-    users = []  # Clear existing users before loading
-    if os.path.exists(file_name):
-        try:
-            with open(file_name, "r") as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        parts = line.split(",")
-                        if len(parts) == 3:
-                            try:
-                                user_id = int(parts[0])
-                                users.append(
-                                    User(id=user_id, name=parts[1], email=parts[2])
-                                )
-                            except ValueError:
-                                print(f"Skipping malformed line (ID not int): {line}")
-                        else:
-                            print(f"Skipping malformed line (not 3 parts): {line}")
-        except IOError as e:
-            print(f"Error opening or reading file: {e}")
+class UserCreate(UserBase):
+    pass  # For creating a user
 
 
-# Function to save users to a file
-def save_users_to_file():
-    try:
-        with open(file_name, "w") as f:
-            for user in users:
-                f.write(str(user) + "\n")
-    except IOError as e:
-        print(f"Error creating or writing to file: {e}")
+class UserResponse(UserBase):
+    id: int
+
+    class Config:
+        from_attributes = True  # Allows Pydantic to create UserResponse from ORM-like objects (e.g. dicts from db rows)
 
 
-# Load users at startup
-load_users_from_file()
-
-
-@app.route("/users", methods=["GET"])
-def handle_get_users():
-    # In Python, Flask handles method checking, but good practice to be explicit
-    # if request.method != 'GET':
-    #     return "Method Not Allowed", 405 # Flask handles this by default
-
-    response_text = "Users:\n"
-    for user in users:
-        response_text += f"ID: {user.id}, Name: {user.name}, Email: {user.email}\n"
-    return response_text, 200, {"Content-Type": "text/plain"}
-
-
-@app.route(
-    "/add", methods=["POST", "GET"]
-)  # Allowing GET for browser testing like Go example
-def handle_add_user():
-    # The Go example uses query parameters for POST, which is unusual.
-    # Typically, POST data comes in the request body.
-    # Flask's request.args handles query parameters for both GET and POST.
-    name = request.args.get("name")
-    email = request.args.get("email")
-
-    if not name or not email:
-        return "Name and Email are required", 400
-
-    # Simple ID generation
-    new_id = len(users) + 1
-    new_user = User(id=new_id, name=name, email=email)
-    users.append(new_user)
-    save_users_to_file()  # Saves every time
-
-    return (
-        f"User added: ID {new_user.id}, Name {new_user.name}, Email {new_user.email}\n",
-        200,
-        {"Content-Type": "text/plain"},
+# --- Database Setup and Dependency Injection ---
+def create_db_and_tables():
+    """Initializes the database and creates the users table if it doesn't exist."""
+    conn = sqlite3.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            age INTEGER DEFAULT 0
+        )
+    """
     )
+    conn.commit()
+    conn.close()
 
 
-if __name__ == "__main__":
-    print("Server starting on http://localhost:8080")
-    # Flask's development server is not recommended for production
-    app.run(host="0.0.0.0", port=8081, debug=True)
+# Dependency: This function will be called by FastAPI for each request
+# that declares a dependency on it.
+def get_db_connection():
+    """
+    Opens a new database connection for the duration of a request.
+    FastAPI will ensure this is called per request needing it,
+    and the 'finally' block ensures the connection is closed.
+    """
+    db = sqlite3.connect(DATABASE_URL)
+    db.row_factory = sqlite3.Row  # Access columns by name
+    try:
+        yield db  # This is what gets injected into your path operation functions
+    finally:
+        db.close()  # Ensures connection is closed after request processing
+
+
+# --- Lifespan Event Handler ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Code to run on application startup
+    create_db_and_tables()
+    print("Database and tables initialized.")
+    yield
+    # Code to run on application shutdown (if any)
+    # print("Application shutting down.")
+
+
+app = FastAPI(
+    title="User API (FastAPI Refactor)", lifespan=lifespan
+)  # Pass the lifespan manager
+
+
+# --- Path Operations (Handlers) ---
+
+
+# Equivalent to Go's handleAddUser
+@app.post(
+    "/users/",
+    response_model=UserResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Users"],
+)
+def add_user(
+    user_in: UserCreate,  # Request body will be parsed into UserCreate model
+    db: sqlite3.Connection = Depends(get_db_connection),  # Dependency Injection
+):
+    """
+    Add a new user.
+    - **name**: User's name (required)
+    - **email**: User's email (required, must be unique)
+    - **age**: User's age (optional, defaults to 0)
+    """
+    # Check for existing email (similar to Go's logic, but more explicit error)
+    cursor_check = db.execute("SELECT id FROM users WHERE email = ?", (user_in.email,))
+    if cursor_check.fetchone():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Email '{user_in.email}' already exists",
+        )
+    try:
+        cursor = db.execute(
+            "INSERT INTO users (name, email, age) VALUES (?, ?, ?)",
+            (user_in.name, user_in.email, user_in.age),
+        )
+        db.commit()
+        created_user_id = cursor.lastrowid
+        # Return the created user data conforming to UserResponse
+        return UserResponse(
+            id=created_user_id, name=user_in.name, email=user_in.email, age=user_in.age
+        )
+    except sqlite3.Error as e:  # Catch specific SQLite errors
+        db.rollback()
+        # Log the error e
+        print(f"Database error on add_user: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An internal error occurred while adding the user.",
+        )
+
+
+# Equivalent to Go's handleGetUsers (combined logic for all users and specific user)
+@app.get("/users/", response_model=List[UserResponse], tags=["Users"])
+def get_users(
+    user_id: Optional[int] = Query(
+        None, description="Optional ID of the user to retrieve"
+    ),  # Query parameter
+    db: sqlite3.Connection = Depends(get_db_connection),  # Dependency Injection
+):
+    """
+    Retrieve users.
+    - If **user_id** is provided, retrieves a specific user.
+    - Otherwise, retrieves a list of all users.
+    """
+    if user_id is not None:
+        cursor = db.execute(
+            "SELECT id, name, email, age FROM users WHERE id = ?", (user_id,)
+        )
+        user_row = cursor.fetchone()
+        if user_row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User with ID {user_id} not found",
+            )
+        return [
+            UserResponse.model_validate(dict(user_row))
+        ]  # Return as a list with one item for consistency or adjust response_model
+    else:
+        cursor = db.execute("SELECT id, name, email, age FROM users")
+        users_rows = cursor.fetchall()
+        return [UserResponse.model_validate(dict(row)) for row in users_rows]
+
+
+# If you want a separate endpoint for getting a user by ID (more RESTful):
+@app.get("/users/{user_id_path}", response_model=UserResponse, tags=["Users"])
+def get_user_by_id(
+    user_id_path: int,  # Path parameter
+    db: sqlite3.Connection = Depends(get_db_connection),
+):
+    """
+    Retrieve a specific user by their ID.
+    """
+    cursor = db.execute(
+        "SELECT id, name, email, age FROM users WHERE id = ?", (user_id_path,)
+    )
+    user_row = cursor.fetchone()
+    if user_row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with ID {user_id_path} not found",
+        )
+    return UserResponse.model_validate(dict(user_row))
+
+
+# To run this: uvicorn api_fastapi_refactor:app --reload
