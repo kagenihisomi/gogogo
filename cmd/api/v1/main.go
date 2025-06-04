@@ -18,10 +18,8 @@ type User struct {
 	ID    int
 	Name  string
 	Email string
+	Age   int `json:"age"` // Added Age field to User struct
 }
-
-// Global variable to store users (bad practice, still populated from DB on start)
-var users []User
 
 // dbFileName where SQLite data is stored
 const dbFileName = "users.db"
@@ -51,33 +49,6 @@ func init() {
 		log.Fatalf("Failed to create table: %v", err) // Log fatal, but still not a good practice
 		return
 	}
-
-	loadUsersFromDB()
-}
-
-// loadUsersFromDB loads users from the SQLite database into the global users slice
-func loadUsersFromDB() {
-	rows, err := db.Query("SELECT id, name, email FROM users")
-	if err != nil {
-		fmt.Println("Error querying users from DB:", err) // Just print
-		return
-	}
-	defer rows.Close() // Defer but no error check on rows.Close()
-
-	users = []User{} // Clear existing users before loading
-	for rows.Next() {
-		var u User
-		err := rows.Scan(&u.ID, &u.Name, &u.Email)
-		if err != nil {
-			fmt.Println("Error scanning user row:", err) // Just print, skip problematic row
-			continue
-		}
-		users = append(users, u)
-	}
-
-	if err := rows.Err(); err != nil {
-		fmt.Println("Error iterating user rows:", err) // Just print
-	}
 }
 
 // Handlers for HTTP requests
@@ -98,28 +69,29 @@ func handleGetUsers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Still reads from the global, potentially racy 'users' slice
-		// Linear search, inefficient for large N
+		dbRows, err := db.Query("SELECT id, name, email, age FROM users WHERE id = ?", targetID)
+		if err != nil {
+			http.Error(w, "Internal server error (DB query)", http.StatusInternalServerError)
+			return
+		}
+		defer dbRows.Close() // Ensure rows are closed
+
 		foundUser := false
-		for _, user := range users {
-			if user.ID == targetID {
-				fmt.Fprintf(w, "User:\nID: %d, Name: %s, Email: %s\n", user.ID, user.Name, user.Email)
-				foundUser = true
-				break
+		for dbRows.Next() {
+			foundUser = true
+			var user User
+			err := dbRows.Scan(&user.ID, &user.Name, &user.Email, &user.Age)
+			if err != nil {
+				http.Error(w, "Internal server error (DB scan)", http.StatusInternalServerError)
+				return
 			}
+			fmt.Fprintf(w, "ID: %d, Name: %s, Email: %s\n", user.ID, user.Name, user.Email)
 		}
 
 		if !foundUser {
 			http.Error(w, fmt.Sprintf("User with ID %d not found", targetID), http.StatusNotFound)
 		}
 		return
-	}
-
-	// If no ID parameter, return all users
-	// Still reads from the global, potentially racy 'users' slice
-	fmt.Fprintf(w, "Users:\n")
-	for _, user := range users {
-		fmt.Fprintf(w, "ID: %d, Name: %s, Email: %s\n", user.ID, user.Name, user.Email)
 	}
 }
 
@@ -143,63 +115,26 @@ func handleAddUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Simple ID generation (problematic in concurrent scenarios, and now potentially conflicting with DB PK)
-	// This ID is based on the in-memory slice, which might be out of sync or racy.
-	newID := len(users) + 1
-	newUser := User{ID: newID, Name: name, Email: email}
-
-	// Still append to the global 'users' slice (bad practice, racy)
-	users = append(users, newUser)
-
-	// Insert into SQLite database
-	// The ID used here is the one generated from len(users), which is bad.
-	// If 'id' in DB is AUTOINCREMENT, this explicit ID might cause issues or be overridden
-	// depending on SQLite's behavior with PRIMARY KEY.
-	// For this exercise, we'll attempt to insert with this potentially problematic ID.
-	stmt, err := db.Prepare("INSERT INTO users(id, name, email) values(?,?,?)")
+	// Insert into SQLite database, letting the DB generate the ID
+	stmt, err := db.Prepare("INSERT INTO users(name, email) values(?,?)")
 	if err != nil {
-		fmt.Println("Error preparing insert statement:", err) // Just print
-		// Note: The user was added to the in-memory 'users' slice but not to DB.
-		// This maintains inconsistency, a "bad practice".
-		http.Error(w, "Internal server error (DB prepare)", http.StatusInternalServerError) // Inform client somewhat
+		fmt.Println("Error preparing insert statement:", err)
+		http.Error(w, "Internal server error (DB prepare)", http.StatusInternalServerError)
 		return
 	}
-	// defer stmt.Close() // Good practice, but keeping it minimal like original
+	defer stmt.Close() // Ensure statement is closed
 
-	_, err = stmt.Exec(newUser.ID, newUser.Name, newUser.Email)
+	_, err = stmt.Exec(name, email)
 	if err != nil {
-		fmt.Println("Error executing insert statement:", err) // Just print
-		// User is in memory 'users' slice but failed to save to DB.
-		// We should ideally remove it from the 'users' slice here for consistency,
-		// but to "keep bad Go usage", we'll leave it inconsistent.
-		// The primary key constraint on ID might be violated here if newID conflicts.
-		http.Error(w, "Internal server error (DB exec)", http.StatusInternalServerError) // Inform client somewhat
-		// Attempt to remove the user from the in-memory slice if DB insert failed,
-		// to reduce *some* inconsistency, though the ID generation is still flawed.
-		// This is a slight deviation to prevent the in-memory slice from growing indefinitely on DB errors.
-		if len(users) > 0 && users[len(users)-1].ID == newUser.ID { // Basic check
-			users = users[:len(users)-1]
-		}
+		fmt.Println("Error executing insert statement:", err)
+		http.Error(w, "Internal server error (DB exec)", http.StatusInternalServerError)
 		return
 	}
-	stmt.Close() // Close statement after execution
 
-	fmt.Fprintf(w, "User added: ID %d, Name %s, Email %s\n", newUser.ID, newUser.Name, newUser.Email)
+	fmt.Fprintf(w, "User added: Name %s, Email %s\n", name, email)
 }
 
 func main() {
-	// Ensure db is closed when the application exits.
-	// This is a minimal attempt at resource cleanup.
-	// In a real app, signal handling for graceful shutdown is better.
-	// defer func() {
-	// 	if db != nil {
-	// 		err := db.Close()
-	// 		if err != nil {
-	// 			fmt.Println("Error closing database:", err)
-	// 		}
-	// 	}
-	// }() // This defer in main won't run if ListenAndServe blocks indefinitely or panics.
-
 	http.HandleFunc("/users", handleGetUsers)
 	http.HandleFunc("/add", handleAddUser)
 
