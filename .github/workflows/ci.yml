@@ -17,7 +17,7 @@ on:
       - ".github/workflows/**"
 
 jobs:
-  build-and-test-api:
+  test: # Separate job for testing, runs once
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -30,17 +30,51 @@ jobs:
 
       - name: Run tests
         run: go test -v ./cmd/api/v1/...
-        # The ./cmd/api/v1/... will run tests in cmd/api/v1 and any subdirectories.
-        # If your tests are only in cmd/api/v1, you can use ./cmd/api/v1
 
-      - name: Build API executable
-        run: go build -v -o myapi_executable ./cmd/api/v1
-        # This builds the package in ./cmd/api/v1
-        # The output will be named 'myapi_executable' in the root of the workspace.
+  build:
+    needs: test # Ensure tests pass before building
+    runs-on: ubuntu-latest # Can still use ubuntu for cross-compilation
+    strategy:
+      matrix:
+        goos: [linux, windows, darwin] # Target Operating Systems
+        goarch: [amd64] # Target Architectures (can add arm64, etc.)
+        # You can add specific combinations or exclude some if needed:
+        # include:
+        #   - goos: linux
+        #     goarch: arm64
+        # exclude:
+        #   - goos: darwin
+        #     goarch: 386 # if you don't want to build for 32-bit macOS
 
-      - name: Upload API executable artifact (optional)
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24" # Specify your Go version
+
+      - name: Build API executable for ${{ matrix.goos }}/${{ matrix.goarch }}
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          output_name="myapi_executable"
+          if [ "$GOOS" = "windows" ]; then
+            output_name="${output_name}.exe"
+          fi
+          echo "Building for $GOOS/$GOARCH, output: $output_name"
+          go build -v -o "$output_name" ./cmd/api/v1
+
+      - name: Upload API executable artifact
         uses: actions/upload-artifact@v4
         with:
-          name: api-v1-executable-${{ runner.os }} # Name of the artifact
-          path: myapi_executable # Path to the file to upload
-          if-no-files-found: error # Fails the step if the executable is not found
+          name: api-v1-executable-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            myapi_executable
+            myapi_executable.exe
+          if-no-files-found: error
+          # The path will try to upload both, but only one will exist per job run.
+          # This is a simple way to handle the .exe extension for Windows.
+          # Alternatively, you can make the path conditional or use the output_name from the build step.
