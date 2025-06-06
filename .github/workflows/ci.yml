@@ -22,14 +22,13 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v3
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.24"
           cache: true # This enables Go module caching
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v3
       # Cache build cache to speed up subsequent test runs
       - name: Set up Go build cache
         uses: actions/cache@v4

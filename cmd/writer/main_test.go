@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	// Added proper import for MinIO credentials
+
 	"github.com/xitongsys/parquet-go-source/local"
 	"github.com/xitongsys/parquet-go/reader"
 )
