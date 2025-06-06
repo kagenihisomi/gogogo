@@ -35,15 +35,8 @@ type DataFrame[T any] struct {
 // CreateDataFrame creates a new DataFrame with the given records
 func CreateDataFrame[T any](records []T) *DataFrame[T] {
 	// Use a pointer to the first record as schema reference, or empty struct if no records
-	var schema interface{}
-	if len(records) > 0 {
-		// Create a new variable of type T and copy the first record into it
-		var first T = records[0]
-		schema = &first // Use pointer to the struct
-	} else {
-		var empty T
-		schema = &empty // Use pointer to empty struct
-	}
+	var empty T
+	schema := &empty
 
 	return &DataFrame[T]{
 		Records: records,
