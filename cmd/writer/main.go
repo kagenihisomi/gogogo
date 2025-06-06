@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -10,7 +11,9 @@ import (
 	"time"
 
 	"github.com/xitongsys/parquet-go-source/local"
+	"github.com/xitongsys/parquet-go-source/s3"
 	"github.com/xitongsys/parquet-go/parquet"
+	"github.com/xitongsys/parquet-go/source"
 	"github.com/xitongsys/parquet-go/writer"
 )
 
@@ -21,12 +24,12 @@ var (
 // Student struct matches the requested schema
 type Student struct {
 	Name    string  `parquet:"name=name, type=BYTE_ARRAY, convertedtype=UTF8, encoding=PLAIN_DICTIONARY"`
-	Age     int32   `parquet:"name=age, type=INT32, encoding=PLAIN"`
+	Age     int32   `parquet:"name=age, type=INT32"`
 	Id      int64   `parquet:"name=id, type=INT64"`
 	Weight  float32 `parquet:"name=weight, type=FLOAT"`
 	Sex     bool    `parquet:"name=sex, type=BOOLEAN"`
 	Day     int32   `parquet:"name=day, type=INT32, convertedtype=DATE"`
-	Ignored int32   //without parquet tag and won't write
+	Ignored *int32  `parquet:"name=ignored, type=INT32"`
 	// Added field for record-level ETL metadata
 	RecordInfo `parquet:"name=_recordinfo, type=MAP, keytype=BYTE_ARRAY, keyconvertedtype=UTF8"`
 }
@@ -56,22 +59,30 @@ func CreateDataFrame[T any](records []T) *DataFrame[T] {
 	}
 }
 
-// WriteToLocalParquet writes the DataFrame to a local Parquet file
-func (df *DataFrame[T]) WriteToLocalParquet(filePath string) error {
-	fw, err := local.NewLocalFileWriter(filePath)
-	if err != nil {
-		return fmt.Errorf("failed to create local writer for path '%s': %w", filePath, err)
-	}
-	defer fw.Close()
+// ParquetWriterConfig holds configuration for Parquet writing
+type ParquetWriterConfig struct {
+	Compression parquet.CompressionCodec
+	Concurrency int64
+}
 
+// DefaultParquetConfig returns the default configuration
+func DefaultParquetConfig() ParquetWriterConfig {
+	return ParquetWriterConfig{
+		Compression: parquet.CompressionCodec_SNAPPY,
+		Concurrency: 4,
+	}
+}
+
+// WriteToParquet writes the DataFrame to a Parquet file using the provided writer
+func (df *DataFrame[T]) WriteToParquet(fw source.ParquetFile, config ParquetWriterConfig) error {
 	// Create the parquet writer
-	pw, err := writer.NewParquetWriter(fw, df.schema, 4)
+	pw, err := writer.NewParquetWriter(fw, df.schema, config.Concurrency)
 	if err != nil {
 		return fmt.Errorf("failed to create parquet writer: %w", err)
 	}
 
 	// Set compression
-	pw.CompressionType = parquet.CompressionCodec_SNAPPY
+	pw.CompressionType = config.Compression
 
 	// Write each record
 	for i, record := range df.Records {
@@ -87,6 +98,23 @@ func (df *DataFrame[T]) WriteToLocalParquet(filePath string) error {
 	}
 
 	return nil
+}
+
+// WriteToLocalParquet writes the DataFrame to a local Parquet file
+func (df *DataFrame[T]) WriteToLocalParquet(filePath string, config ...ParquetWriterConfig) error {
+	fw, err := local.NewLocalFileWriter(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to create local writer for path '%s': %w", filePath, err)
+	}
+	defer fw.Close()
+
+	// Use provided config or default
+	cfg := DefaultParquetConfig()
+	if len(config) > 0 {
+		cfg = config[0]
+	}
+
+	return df.WriteToParquet(fw, cfg)
 }
 
 type BaseSchemaParser[T any] struct{}
@@ -125,6 +153,36 @@ func (p *BaseSchemaParser[T]) ParseFromRaw(
 	return record, nil
 }
 
+// S3Config holds AWS S3 configuration
+type S3Config struct {
+	Region          string
+	Bucket          string
+	Key             string
+	AccessKeyID     string
+	SecretAccessKey string
+	SessionToken    string
+	Endpoint        string // Optional for custom endpoints
+}
+
+// WriteToS3Parquet writes the DataFrame to an S3 Parquet file
+func (df *DataFrame[T]) WriteToS3Parquet(ctx context.Context, bucket, key string, config ...ParquetWriterConfig) error {
+	// Create S3 file writer
+	fw, err := s3.NewS3FileWriter(ctx, bucket, key, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create S3 writer for bucket '%s' and key '%s': %w",
+			bucket, key, err)
+	}
+	defer fw.Close()
+
+	// Use provided config or default
+	cfg := DefaultParquetConfig()
+	if len(config) > 0 {
+		cfg = config[0]
+	}
+
+	return df.WriteToParquet(fw, cfg)
+}
+
 func main() {
 	jsonData := `[
 		{
@@ -141,7 +199,8 @@ func main() {
 			"Id": 1002,
 			"Weight": 72.5,
 			"Sex": true,
-			"Day": 10731
+			"Day": 10731,
+			"Ignored": 1
 		}
 	]`
 
