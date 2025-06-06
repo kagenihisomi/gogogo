@@ -2,14 +2,14 @@ name: Go Build and Test API
 
 on:
   push:
-    branches: ["main"] # Or your default branch
+    branches: ["main"]
     paths:
-      - "cmd/**" # Only run if files in this path change
+      - "cmd/**"
       - "go.mod"
       - "go.sum"
       - ".github/workflows/**"
   pull_request:
-    branches: ["main"] # Or your default branch
+    branches: ["main"]
     paths:
       - "cmd/**"
       - "go.mod"
@@ -17,7 +17,7 @@ on:
       - ".github/workflows/**"
 
 jobs:
-  test: # Separate job for testing, runs once
+  test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -26,28 +26,39 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24" # Specify your Go version
+          go-version: "1.24"
+          cache: true # This enables Go module caching
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v3
+      # Cache build cache to speed up subsequent test runs
+      - name: Set up Go build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            /tmp/go-build-cache
+          key: ${{ runner.os }}-go-build-cache-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-build-cache-
 
       - name: Install gotestsum
         run: go install gotest.tools/gotestsum@latest
 
       - name: Run tests
-        run: gotestsum --format testname ./...
+        run: |
+          # Skip TestWriteToS3Parquet in CI as it requires container setup
+          gotestsum --format testname -- -short ./...
+        env:
+          # Use a dedicated directory for build cache
+          GOCACHE: /tmp/go-build-cache
 
   build:
-    needs: test # Ensure tests pass before building
-    runs-on: ubuntu-latest # Can still use ubuntu for cross-compilation
+    needs: test
+    runs-on: ubuntu-latest
     strategy:
       matrix:
-        goos: [linux, windows, darwin] # Target Operating Systems
-        goarch: [amd64] # Target Architectures (can add arm64, etc.)
-        # You can add specific combinations or exclude some if needed:
-        # include:
-        #   - goos: linux
-        #     goarch: arm64
-        # exclude:
-        #   - goos: darwin
-        #     goarch: 386 # if you don't want to build for 32-bit macOS
+        goos: [linux, windows, darwin]
+        goarch: [amd64]
 
     steps:
       - name: Checkout code
@@ -56,12 +67,25 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24" # Specify your Go version
+          go-version: "1.24"
+          cache: true # This enables Go module caching
+
+      # Cache build cache to speed up compilations
+      - name: Set up Go build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            /tmp/go-build-cache
+          key: ${{ runner.os }}-go-build-cache-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-build-cache-
 
       - name: Build API executable for ${{ matrix.goos }}/${{ matrix.goarch }}
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          GOCACHE: /tmp/go-build-cache
         run: |
           output_name="myapi_executable"
           if [ "$GOOS" = "windows" ]; then
@@ -78,6 +102,3 @@ jobs:
             myapi_executable
             myapi_executable.exe
           if-no-files-found: error
-          # The path will try to upload both, but only one will exist per job run.
-          # This is a simple way to handle the .exe extension for Windows.
-          # Alternatively, you can make the path conditional or use the output_name from the build step.
