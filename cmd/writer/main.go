@@ -1,9 +1,12 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
+	"reflect"
 	"time"
 
 	"github.com/xitongsys/parquet-go-source/local"
@@ -24,6 +27,16 @@ type Student struct {
 	Sex     bool    `parquet:"name=sex, type=BOOLEAN"`
 	Day     int32   `parquet:"name=day, type=INT32, convertedtype=DATE"`
 	Ignored int32   //without parquet tag and won't write
+	// Added field for record-level ETL metadata
+	RecordInfo `parquet:"name=_recordinfo, type=MAP, keytype=BYTE_ARRAY, keyconvertedtype=UTF8"`
+}
+
+type RecordInfo struct {
+	RawData         string `json:"_raw_data" parquet:"name=_raw_data, type=BYTE_ARRAY, ConvertedType=UTF8"`
+	RowHash         string `json:"_row_hash" parquet:"name=_row_hash, type=BYTE_ARRAY, ConvertedType=UTF8"`
+	IngestTimestamp int64  `json:"_ingest_timestamp" parquet:"name=_ingest_timestamp, type=INT64, logicaltype=TIMESTAMP, logicaltype.isadjustedtoutc=true, logicaltype.unit=MILLIS"`
+	SourceSystem    string `json:"_source_system" parquet:"name=_source_system, type=BYTE_ARRAY, ConvertedType=UTF8"`
+	SourceEndpoint  string `json:"_source_endpoint" parquet:"name=_source_endpoint, type=BYTE_ARRAY, ConvertedType=UTF8"`
 }
 
 // DataFrame is a generic container for tabular data
@@ -34,7 +47,7 @@ type DataFrame[T any] struct {
 
 // CreateDataFrame creates a new DataFrame with the given records
 func CreateDataFrame[T any](records []T) *DataFrame[T] {
-	// Use a pointer to the first record as schema reference, or empty struct if no records
+	// Runtime pointer to the first record as schema reference
 	var empty T
 	schema := &empty
 
@@ -46,7 +59,6 @@ func CreateDataFrame[T any](records []T) *DataFrame[T] {
 
 // WriteToLocalParquet writes the DataFrame to a local Parquet file
 func (df *DataFrame[T]) WriteToLocalParquet(filePath string) error {
-	// Create the file writer
 	fw, err := local.NewLocalFileWriter(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to create local writer for path '%s': %w", filePath, err)
@@ -78,58 +90,93 @@ func (df *DataFrame[T]) WriteToLocalParquet(filePath string) error {
 	return nil
 }
 
+type BaseSchemaParser[T any] struct{}
+
+func (p *BaseSchemaParser[T]) ParseFromRaw(
+	rawData []byte,
+	sourceSystem,
+	sourceEndpoint string,
+) (T, error) {
+	var record T
+
+	// Parse the record data
+	if err := json.Unmarshal(rawData, &record); err != nil {
+		return record, fmt.Errorf("failed to parse record: %w", err)
+	}
+
+	// Calculate hash
+	h := sha256.New()
+	h.Write(rawData)
+	recordInfo := RecordInfo{
+		RawData:         string(rawData),
+		SourceSystem:    sourceSystem,
+		SourceEndpoint:  sourceEndpoint,
+		IngestTimestamp: int64(time.Now().UTC().UnixMilli()),
+		RowHash:         hex.EncodeToString(h.Sum(nil)),
+	}
+
+	// Use reflection to set the RecordInfo field if it exists
+	v := reflect.ValueOf(&record).Elem()
+	f := v.FieldByName("RecordInfo")
+	if f.IsValid() && f.CanSet() {
+		f.Set(reflect.ValueOf(recordInfo))
+	} else {
+		return record, fmt.Errorf("type %T does not have a settable RecordInfo field", record)
+	}
+
+	return record, nil
+}
+
 func main() {
-	outputFilePath = "tmp/students.parquet"
-	fmt.Printf("Creating student records and writing to: %s\n", outputFilePath)
+	jsonData := `[
+        {
+            "Name": "Alice",
+            "Age": 22,
+            "Id": 1001,
+            "Weight": 65.5,
+            "Sex": false,
+            "Day": 10957
+        },
+        {
+            "Name": "Bob",
+            "Age": 23,
+            "Id": 1002,
+            "Weight": 72.5,
+            "Sex": true,
+            "Day": 10731
+        }
+    ]`
 
-	// Create sample student data
-	students := []Student{
-		{
-			Name:    "Alice",
-			Age:     22,
-			Id:      1001,
-			Weight:  65.5,
-			Sex:     false,                                                             // female
-			Day:     int32(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC).Unix() / 86400), // Convert to days since epoch
-			Ignored: 100,                                                               // This field will be ignored in the parquet file
-		},
-		{
-			Name:    "Bob",
-			Age:     23,
-			Id:      1002,
-			Weight:  72.5,
-			Sex:     true, // male
-			Day:     int32(time.Date(1999, 5, 10, 0, 0, 0, 0, time.UTC).Unix() / 86400),
-			Ignored: 200,
-		},
-		{
-			Name:    "Charlie",
-			Age:     21,
-			Id:      1003,
-			Weight:  68.0,
-			Sex:     true,
-			Day:     int32(time.Date(2001, 7, 23, 0, 0, 0, 0, time.UTC).Unix() / 86400),
-			Ignored: 300,
-		},
-	}
-
-	// Create a DataFrame
-	df := CreateDataFrame(students)
-
-	// Create output directory if it doesn't exist
-	outputDir := filepath.Dir(outputFilePath)
-	if outputDir != "" && outputDir != "." {
-		if err := os.MkdirAll(outputDir, 0755); err != nil {
-			fmt.Printf("Failed to create output directory: %v\n", err)
-			os.Exit(1)
-		}
-	}
-
-	// Write to Parquet
-	if err := df.WriteToLocalParquet(outputFilePath); err != nil {
-		fmt.Printf("Failed to write Parquet file: %v\n", err)
+	// Unmarshal the JSON array into a slice of json.RawMessage
+	var rawRecords []json.RawMessage
+	if err := json.Unmarshal([]byte(jsonData), &rawRecords); err != nil {
+		fmt.Printf("failed to unmarshal JSON array: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("Successfully wrote %d student records to Parquet file\n", len(students))
+	// Create a parser for the Student type.
+	parser := BaseSchemaParser[Student]{}
+
+	// Parse each raw record using ParseFromRaw
+	var students []Student
+	for _, raw := range rawRecords {
+		student, err := parser.ParseFromRaw(raw, "mysource", "myendpoint")
+		if err != nil {
+			fmt.Printf("failed to parse record: %v\n", err)
+			os.Exit(1)
+		}
+		students = append(students, student)
+	}
+
+	// Now students slice contains all enriched Student records.
+	fmt.Printf("Parsed %d records\n", len(students))
+
+	outputFilePath = "tmp/students.parquet"
+	fmt.Printf("Creating student records and writing to: %s\n", outputFilePath)
+
+	// Create DataFrame and write to Parquet
+	df := CreateDataFrame(students)
+
+	df.WriteToLocalParquet(outputFilePath)
+
 }
