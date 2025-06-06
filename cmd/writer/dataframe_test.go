@@ -50,26 +50,20 @@ func setupMinioContainer(ctx context.Context) (testcontainers.Container, string,
 	return container, endpoint, nil
 }
 
-// createMinioClient creates a MinIO client connected to the specified endpoint
-func createMinioClient(endpoint string) (*minio.Client, error) {
-	return minio.New(endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4("minioaccesskey", "miniosecretkey", ""),
-		Secure: false,
-		Region: "us-east-1",
-	})
-}
-
-// ensureBucketExists creates a bucket if it doesn't already exist
-func ensureBucketExists(ctx context.Context, client *minio.Client, bucket string) error {
-	err := client.MakeBucket(ctx, bucket, minio.MakeBucketOptions{Region: "us-east-1"})
+// Add this function to bridge the naming gap
+func startMinioContainer(ctx context.Context, t *testing.T) (testcontainers.Container, error) {
+	container, endpoint, err := setupMinioContainer(ctx)
 	if err != nil {
-		// Check if bucket already exists
-		exists, errExists := client.BucketExists(ctx, bucket)
-		if errExists != nil || !exists {
-			return fmt.Errorf("failed to create bucket: %w", err)
-		}
+		return nil, err
 	}
-	return nil
+
+	// Update the hardcoded endpoint in the test to use the dynamic one
+	t.Logf("MinIO container started at endpoint: %s", endpoint)
+
+	// Modify environment variables to use the correct endpoint
+	os.Setenv("AWS_ENDPOINT", endpoint)
+
+	return container, nil
 }
 
 func TestWriteToS3Parquet(t *testing.T) {
@@ -81,7 +75,7 @@ func TestWriteToS3Parquet(t *testing.T) {
 	ctx := context.Background()
 	bucket := "test-bucket"
 	key := "test-students.parquet"
-	endpoint := "localhost:9000"
+	endpoint := os.Getenv("AWS_ENDPOINT")
 
 	// Save original environment variables
 	origAWSAccessKey := os.Getenv("AWS_ACCESS_KEY_ID")
@@ -110,7 +104,11 @@ func TestWriteToS3Parquet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to start MinIO container: %v", err)
 	}
-	defer minioC.Terminate(ctx)
+	defer func() {
+		if err := minioC.Terminate(ctx); err != nil {
+			t.Logf("Warning: Failed to terminate MinIO container: %v", err)
+		}
+	}()
 
 	// Create MinIO client using same credentials as environment
 	minioClient, err := minio.New(endpoint, &minio.Options{

@@ -42,7 +42,7 @@ var sharedRetryableClient *retryablehttp.Client
 
 func init() {
 	// Seed the global random number generator (good practice, though retryablehttp handles its own jitter)
-	rand.Seed(time.Now().UnixNano())
+	rand.New(rand.NewSource(42))
 
 	client := retryablehttp.NewClient()
 	client.RetryMax = maxRetries

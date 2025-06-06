@@ -181,8 +181,14 @@ func handleAddUser(db *sql.DB) http.HandlerFunc {
 		newUser.ID = int(lastID) // Assign the generated ID
 
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)  // 201 Created status
-		json.NewEncoder(w).Encode(newUser) // Respond with the created user as JSON
+		w.WriteHeader(http.StatusCreated) // 201 Created status
+		err = json.NewEncoder(w).Encode(newUser)
+		if err != nil {
+			log.Printf("Error encoding response: %v", err)
+			// Note: Headers might have been sent already, so we can't change status code
+			// Just log the error and return
+			return
+		}
 	}
 }
 

@@ -234,6 +234,9 @@ func main() {
 	// Create DataFrame and write to Parquet
 	df := CreateDataFrame(students)
 
-	df.WriteToLocalParquet(outputFilePath)
+	if err := df.WriteToLocalParquet(outputFilePath); err != nil {
+		fmt.Printf("failed to write to parquet: %v\n", err)
+		os.Exit(1)
+	}
 
 }
