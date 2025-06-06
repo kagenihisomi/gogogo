@@ -4,14 +4,14 @@ on:
   push:
     branches: ["main"] # Or your default branch
     paths:
-      - "cmd/api/v1/**" # Only run if files in this path change
+      - "cmd/**" # Only run if files in this path change
       - "go.mod"
       - "go.sum"
       - ".github/workflows/**"
   pull_request:
     branches: ["main"] # Or your default branch
     paths:
-      - "cmd/api/v1/**"
+      - "cmd/**
       - "go.mod"
       - "go.sum"
       - ".github/workflows/**"
@@ -27,9 +27,12 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: "1.24" # Specify your Go version
-
+      
+      - name: Install gotestsum
+        run: go install gotest.tools/gotestsum@latest
+          
       - name: Run tests
-        run: gotestsum -v ./...
+        run: gotestsum -v ./... --format testname
 
   build:
     needs: test # Ensure tests pass before building
