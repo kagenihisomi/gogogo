@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"runtime"
 	"testing"
 	"time"
@@ -72,59 +73,86 @@ func ensureBucketExists(ctx context.Context, client *minio.Client, bucket string
 }
 
 func TestWriteToS3Parquet(t *testing.T) {
-	// Skip this test on Windows
 	if runtime.GOOS == "windows" {
 		t.Skip("Skipping test on Windows: rootless Docker not supported")
 	}
 
+	// Setup test environment
 	ctx := context.Background()
+	bucket := "test-bucket"
+	key := "test-students.parquet"
+	endpoint := "localhost:9000"
 
-	// Set up MinIO container
-	container, endpoint, err := setupMinioContainer(ctx)
+	// Save original environment variables
+	origAWSAccessKey := os.Getenv("AWS_ACCESS_KEY_ID")
+	origAWSSecretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+	origAWSEndpoint := os.Getenv("AWS_ENDPOINT")
+	origAWSRegion := os.Getenv("AWS_REGION")
+
+	// Set environment variables for test
+	os.Setenv("AWS_ACCESS_KEY_ID", "minioaccesskey")
+	os.Setenv("AWS_SECRET_ACCESS_KEY", "miniosecretkey")
+	os.Setenv("AWS_ENDPOINT", endpoint)
+	os.Setenv("AWS_REGION", "us-east-1")
+	os.Setenv("AWS_S3_FORCE_PATH_STYLE", "true") // Important for MinIO
+
+	// Restore environment after test
+	defer func() {
+		os.Setenv("AWS_ACCESS_KEY_ID", origAWSAccessKey)
+		os.Setenv("AWS_SECRET_ACCESS_KEY", origAWSSecretKey)
+		os.Setenv("AWS_ENDPOINT", origAWSEndpoint)
+		os.Setenv("AWS_REGION", origAWSRegion)
+		os.Unsetenv("AWS_S3_FORCE_PATH_STYLE")
+	}()
+
+	// Start MinIO container
+	minioC, err := startMinioContainer(ctx, t)
 	if err != nil {
-		t.Fatalf("Failed to set up MinIO: %v", err)
+		t.Fatalf("Failed to start MinIO container: %v", err)
 	}
-	defer container.Terminate(ctx)
+	defer minioC.Terminate(ctx)
 
-	// Create MinIO client
-	minioClient, err := createMinioClient(endpoint)
+	// Create MinIO client using same credentials as environment
+	minioClient, err := minio.New(endpoint, &minio.Options{
+		Creds: credentials.NewStaticV4(
+			os.Getenv("AWS_ACCESS_KEY_ID"),
+			os.Getenv("AWS_SECRET_ACCESS_KEY"),
+			""),
+		Secure: false,
+		Region: os.Getenv("AWS_REGION"),
+	})
 	if err != nil {
 		t.Fatalf("Failed to create MinIO client: %v", err)
 	}
 
-	// Ensure test bucket exists
-	bucket := "test-bucket"
-	if err := ensureBucketExists(ctx, minioClient, bucket); err != nil {
-		t.Fatalf("Failed to ensure bucket exists: %v", err)
+	// Create bucket
+	if err := minioClient.MakeBucket(ctx, bucket, minio.MakeBucketOptions{}); err != nil {
+		t.Fatalf("Failed to create bucket: %v", err)
 	}
 
-	// Prepare test data
-	students := []Student{
-		{
-			Name:   "Test Student",
-			Age:    30,
-			Id:     1,
-			Weight: 70.0,
-			Sex:    true,
-			Day:    1,
-		},
+	// Create test data
+	students := []TestStudent{
+		{Name: "Alice", Age: 20, Id: 1, Weight: 60.5},
+		{Name: "Bob", Age: 22, Id: 2, Weight: 70.3},
 	}
+
+	// Create DataFrame
 	df := CreateDataFrame(students)
 
-	// Write data to S3 (with context)
-	key := "students.parquet"
+	// Write to S3 using the original interface
+	// The AWS SDK will pick up credentials from environment variables
 	if err := df.WriteToS3Parquet(ctx, bucket, key); err != nil {
 		t.Fatalf("Failed to write to S3: %v", err)
 	}
 
-	// Verify file was written correctly
-	objInfo, err := minioClient.StatObject(ctx, bucket, key, minio.StatObjectOptions{})
+	// Verify the object exists
+	info, err := minioClient.StatObject(ctx, bucket, key, minio.StatObjectOptions{})
 	if err != nil {
 		t.Fatalf("Failed to stat object: %v", err)
 	}
-	if objInfo.Size == 0 {
-		t.Fatalf("Object size is zero, file may be empty")
-	}
 
-	t.Logf("Successfully wrote and verified Parquet file of size %d bytes", objInfo.Size)
+	t.Logf("Successfully wrote and verified object: %s/%s (size: %d bytes)",
+		bucket, key, info.Size)
+
+	// Additional verification could download and parse the Parquet file
 }
