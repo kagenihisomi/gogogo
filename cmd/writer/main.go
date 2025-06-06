@@ -35,8 +35,7 @@ type RecordInfo struct {
 	RawData         string `json:"_raw_data" parquet:"name=_raw_data, type=BYTE_ARRAY, ConvertedType=UTF8"`
 	RowHash         string `json:"_row_hash" parquet:"name=_row_hash, type=BYTE_ARRAY, ConvertedType=UTF8"`
 	IngestTimestamp int64  `json:"_ingest_timestamp" parquet:"name=_ingest_timestamp, type=INT64, logicaltype=TIMESTAMP, logicaltype.isadjustedtoutc=true, logicaltype.unit=MILLIS"`
-	SourceSystem    string `json:"_source_system" parquet:"name=_source_system, type=BYTE_ARRAY, ConvertedType=UTF8"`
-	SourceEndpoint  string `json:"_source_endpoint" parquet:"name=_source_endpoint, type=BYTE_ARRAY, ConvertedType=UTF8"`
+	SourceInfo      string `json:"_source_info" parquet:"name=_source_info, type=BYTE_ARRAY, ConvertedType=UTF8"`
 }
 
 // DataFrame is a generic container for tabular data
@@ -94,8 +93,7 @@ type BaseSchemaParser[T any] struct{}
 
 func (p *BaseSchemaParser[T]) ParseFromRaw(
 	rawData []byte,
-	sourceSystem,
-	sourceEndpoint string,
+	sourceInfo string,
 ) (T, error) {
 	var record T
 
@@ -109,8 +107,7 @@ func (p *BaseSchemaParser[T]) ParseFromRaw(
 	h.Write(rawData)
 	recordInfo := RecordInfo{
 		RawData:         string(rawData),
-		SourceSystem:    sourceSystem,
-		SourceEndpoint:  sourceEndpoint,
+		SourceInfo:      sourceInfo,
 		IngestTimestamp: int64(time.Now().UTC().UnixMilli()),
 		RowHash:         hex.EncodeToString(h.Sum(nil)),
 	}
@@ -119,6 +116,7 @@ func (p *BaseSchemaParser[T]) ParseFromRaw(
 	v := reflect.ValueOf(&record).Elem()
 	f := v.FieldByName("RecordInfo")
 	if f.IsValid() && f.CanSet() {
+
 		f.Set(reflect.ValueOf(recordInfo))
 	} else {
 		return record, fmt.Errorf("type %T does not have a settable RecordInfo field", record)
@@ -129,23 +127,23 @@ func (p *BaseSchemaParser[T]) ParseFromRaw(
 
 func main() {
 	jsonData := `[
-        {
-            "Name": "Alice",
-            "Age": 22,
-            "Id": 1001,
-            "Weight": 65.5,
-            "Sex": false,
-            "Day": 10957
-        },
-        {
-            "Name": "Bob",
-            "Age": 23,
-            "Id": 1002,
-            "Weight": 72.5,
-            "Sex": true,
-            "Day": 10731
-        }
-    ]`
+		{
+			"Name": "Alice",
+			"Age": 22,
+			"Id": 1001,
+			"Weight": 65.5,
+			"Sex": false,
+			"Day": 10957
+		},
+		{
+			"Name": "Bob",
+			"Age": 23,
+			"Id": 1002,
+			"Weight": 72.5,
+			"Sex": true,
+			"Day": 10731
+		}
+	]`
 
 	// Unmarshal the JSON array into a slice of json.RawMessage
 	var rawRecords []json.RawMessage
@@ -160,7 +158,7 @@ func main() {
 	// Parse each raw record using ParseFromRaw
 	var students []Student
 	for _, raw := range rawRecords {
-		student, err := parser.ParseFromRaw(raw, "mysource", "myendpoint")
+		student, err := parser.ParseFromRaw(raw, "myjson")
 		if err != nil {
 			fmt.Printf("failed to parse record: %v\n", err)
 			os.Exit(1)
