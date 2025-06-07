@@ -83,6 +83,72 @@ func TestLocalParquet(t *testing.T) {
 	t.Logf("Successfully verified %d records", len(originalDF.Records))
 }
 
+// TestLocalJSONL tests writing to and reading from a local JSONL file
+func TestLocalJSONL(t *testing.T) {
+	type TestStudent struct {
+		Name   string  `json:"name"`
+		Age    int32   `json:"age"`
+		Id     int64   `json:"id"`
+		Weight float32 `json:"weight"`
+	}
+	// Create test data
+	students := []TestStudent{
+		{Name: "Alice", Age: 20, Id: 1, Weight: 60.5},
+		{Name: "Bob", Age: 22, Id: 2, Weight: 70.3},
+		{Name: "Charlie", Age: 25, Id: 3, Weight: 80.1},
+	}
+
+	// Create directory if it doesn't exist
+	dirPath := "tmp"
+	if err := os.MkdirAll(dirPath, 0755); err != nil {
+		t.Fatalf("Failed to create directory: %v", err)
+	}
+
+	// Create a temporary file for testing
+	tempFile := filepath.Join(dirPath, "test_students.jsonl")
+	defer os.Remove(tempFile) // Clean up after test
+
+	// Create DataFrame and write to JSONL
+	originalDF := CreateDataFrame(students)
+	err := originalDF.WriteToJSONL(tempFile)
+	if err != nil {
+		t.Fatalf("Failed to write to JSONL: %v", err)
+	}
+
+	// Read the JSONL file back into a DataFrame
+	readDF, err := ReadFromJSONL[TestStudent](tempFile)
+	if err != nil {
+		t.Fatalf("Failed to read from JSONL: %v", err)
+	}
+
+	// Compare the DataFrames
+	if len(originalDF.Records) != len(readDF.Records) {
+		t.Errorf("Record count mismatch: original=%d, read=%d",
+			len(originalDF.Records), len(readDF.Records))
+	}
+
+	// Compare each record
+	for i := 0; i < len(originalDF.Records); i++ {
+		orig := originalDF.Records[i]
+		read := readDF.Records[i]
+
+		if orig.Name != read.Name {
+			t.Errorf("Name mismatch at index %d: original=%s, read=%s", i, orig.Name, read.Name)
+		}
+		if orig.Age != read.Age {
+			t.Errorf("Age mismatch at index %d: original=%d, read=%d", i, orig.Age, read.Age)
+		}
+		if orig.Id != read.Id {
+			t.Errorf("Id mismatch at index %d: original=%d, read=%d", i, orig.Id, read.Id)
+		}
+		if orig.Weight != read.Weight {
+			t.Errorf("Weight mismatch at index %d: original=%f, read=%f", i, orig.Weight, read.Weight)
+		}
+	}
+
+	t.Logf("Successfully verified %d records", len(originalDF.Records))
+}
+
 // TestParseAndParquet tests the full pipeline: parsing JSON to Student structs with RecordInfo,
 // writing to Parquet, reading back, and verifying all data remains intact.
 func TestParseAndParquet(t *testing.T) {

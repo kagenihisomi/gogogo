@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"time"
 
@@ -20,10 +23,6 @@ import (
 	"github.com/xitongsys/parquet-go/writer"
 )
 
-var (
-	outputFilePath string
-)
-
 // Student struct matches the requested schema
 type Student struct {
 	Name    string  `parquet:"name=name, type=BYTE_ARRAY, convertedtype=UTF8, encoding=PLAIN_DICTIONARY"`
@@ -34,7 +33,7 @@ type Student struct {
 	Day     int32   `parquet:"name=day, type=INT32, convertedtype=DATE"`
 	Ignored *int32  `parquet:"name=ignored, type=INT32"`
 	// Added field for record-level ETL metadata
-	RecordInfo `parquet:"name=_recordinfo, type=MAP, keytype=BYTE_ARRAY, keyconvertedtype=UTF8"`
+	RecordInfo `json:"_recordinfo" parquet:"name=_recordinfo, type=MAP, keytype=BYTE_ARRAY, keyconvertedtype=UTF8"`
 }
 
 type RecordInfo struct {
@@ -237,6 +236,93 @@ func ReadFromS3Parquet[T any](ctx context.Context, s3client *awsS3.S3, bucket, k
 	return ReadFromParquet[T](fr)
 }
 
+// WriteToJSONL writes the DataFrame to a JSONL file
+func (df *DataFrame[T]) WriteToJSONL(filePath string) error {
+	// Create parent directories if they don't exist
+	dir := filepath.Dir(filePath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create directory '%s': %w", dir, err)
+	}
+
+	// Create or truncate the output file
+	file, err := os.Create(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to create JSONL file '%s': %w", filePath, err)
+	}
+	defer file.Close()
+
+	// Create a buffered writer for better performance
+	writer := bufio.NewWriter(file)
+	defer writer.Flush()
+
+	// Process each record
+	for i, record := range df.Records {
+		// Marshal the record to JSON
+		jsonBytes, err := json.Marshal(record)
+		if err != nil {
+			return fmt.Errorf("failed to marshal record at index %d: %w", i, err)
+		}
+
+		// Write the JSON line with a newline character
+		if _, err := writer.Write(jsonBytes); err != nil {
+			return fmt.Errorf("failed to write record at index %d: %w", i, err)
+		}
+		if _, err := writer.Write([]byte("\n")); err != nil {
+			return fmt.Errorf("failed to write newline at index %d: %w", i, err)
+		}
+	}
+
+	return nil
+}
+
+// ReadFromJSONL reads a DataFrame from a JSONL file
+func ReadFromJSONL[T any](filePath string) (*DataFrame[T], error) {
+	// Open the file
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open JSONL file '%s': %w", filePath, err)
+	}
+	defer file.Close()
+
+	// Create a scanner to read line by line
+	scanner := bufio.NewScanner(file)
+
+	// For large JSON objects, increase the buffer size if needed
+	const maxCapacity = 10 * 1024 * 1024 // 10MB
+	buf := make([]byte, 0, 64*1024)      // Start with 64KB
+	scanner.Buffer(buf, maxCapacity)
+
+	// Parse each line into a record
+	var records []T
+	lineNum := 0
+
+	for scanner.Scan() {
+		lineNum++
+		line := scanner.Bytes()
+
+		// Skip empty lines
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+
+		// Parse the JSON into a record
+		var record T
+		if err := json.Unmarshal(line, &record); err != nil {
+			return nil, fmt.Errorf("failed to parse JSONL at line %d: %w", lineNum, err)
+		}
+
+		records = append(records, record)
+	}
+
+	// Check for scanner errors
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("error reading JSONL file: %w", err)
+	}
+
+	// Create and return the DataFrame
+	return CreateDataFrame(records), nil
+}
+
 func main() {
 	jsonData := `[
 		{
@@ -282,13 +368,15 @@ func main() {
 	// Now students slice contains all enriched Student records.
 	fmt.Printf("Parsed %d records\n", len(students))
 
-	outputFilePath = "tmp/students.parquet"
-	fmt.Printf("Creating student records and writing to: %s\n", outputFilePath)
-
 	// Create DataFrame and write to Parquet
 	df := CreateDataFrame(students)
 
-	if err := df.WriteToLocalParquet(outputFilePath); err != nil {
+	if err := df.WriteToJSONL("tmp/students.jsonl"); err != nil {
+		fmt.Printf("failed to write to JSONL: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := df.WriteToLocalParquet("tmp/students.parquet"); err != nil {
 		fmt.Printf("failed to write to parquet: %v\n", err)
 		os.Exit(1)
 	}
