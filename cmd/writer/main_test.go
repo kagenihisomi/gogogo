@@ -1,11 +1,20 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
-	// Added proper import for MinIO credentials
+
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/credentials"
+	"github.com/aws/aws-sdk-go/aws/session"
+	awsS3 "github.com/aws/aws-sdk-go/service/s3" // Use alias to avoid conflict
+	"github.com/ory/dockertest/v3"
+	"github.com/ory/dockertest/v3/docker"
 )
 
 // Happy path for the test file
@@ -213,4 +222,268 @@ func TestParseAndParquet(t *testing.T) {
 	}
 
 	t.Logf("Successfully verified %d records with RecordInfo", len(originalDF.Records))
+}
+
+// TestS3Parquet tests writing to and reading from an S3-compatible storage (MinIO)
+func TestS3Parquet(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping S3 test in short mode")
+	}
+
+	// Setup MinIO
+	bucketName, _, s3Client, cleanup := setupMinioS3(t)
+	defer cleanup()
+
+	// Setup test data
+	ctx := context.Background()
+	keyName := "test-data/students.parquet"
+	// Define a function-scoped test type
+	type TestStudent struct {
+		Name   string  `parquet:"name=name, type=BYTE_ARRAY, convertedtype=UTF8, encoding=PLAIN_DICTIONARY"`
+		Age    int32   `parquet:"name=age, type=INT32"`
+		Id     int64   `parquet:"name=id, type=INT64"`
+		Weight float32 `parquet:"name=weight, type=FLOAT"`
+		Sex    bool    `parquet:"name=sex, type=BOOLEAN"`
+		Day    int32   `parquet:"name=day, type=INT32"`
+	}
+
+	// Prepare test data
+	students := []TestStudent{
+		{Name: "Alice", Age: 20, Id: 1001, Weight: 60.5, Sex: false, Day: 10957},
+		{Name: "Bob", Age: 22, Id: 1002, Weight: 70.3, Sex: true, Day: 10731},
+	}
+
+	// Write to S3 using the existing function
+	df := CreateDataFrame(students)
+	err := df.WriteToS3Parquet(ctx, s3Client, bucketName, keyName)
+	if err != nil {
+		t.Fatalf("Failed to write to S3: %v", err)
+	}
+
+	// List objects in bucket for debugging
+	listResult, err := s3Client.ListObjectsV2(&awsS3.ListObjectsV2Input{
+		Bucket: aws.String(bucketName),
+	})
+	if err != nil {
+		t.Logf("Could not list objects: %v", err)
+	} else {
+		t.Logf("Objects in bucket:")
+		for _, obj := range listResult.Contents {
+			t.Logf("  - %s", *obj.Key)
+		}
+	}
+
+	// Verify the file exists before reading
+	_, err = s3Client.HeadObject(&awsS3.HeadObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(keyName),
+	})
+	if err != nil {
+		t.Fatalf("File was not written or not accessible: %v", err)
+	}
+
+	// Read from S3 using the existing function
+	readDF, err := ReadFromS3Parquet[TestStudent](ctx, s3Client, bucketName, keyName)
+	if err != nil {
+		t.Fatalf("Failed to read from S3: %v", err)
+	}
+
+	// Verify data
+	if len(readDF.Records) != len(students) {
+		t.Errorf("Record count mismatch: expected=%d, got=%d",
+			len(students), len(readDF.Records))
+	}
+
+	for i, student := range students {
+		read := readDF.Records[i]
+		if student.Name != read.Name || student.Age != read.Age || student.Id != read.Id {
+			t.Errorf("Record %d data mismatch", i)
+		}
+		if student.Sex != read.Sex || student.Day != read.Day || student.Weight != read.Weight {
+			t.Errorf("Record %d extended data mismatch", i)
+		}
+	}
+
+	t.Logf("Successfully verified %d records from S3", len(readDF.Records))
+}
+
+// setupMinioS3 creates a MinIO container and configures it for testing
+// Returns: bucketName, minioURL, s3Client, cleanup function
+func setupMinioS3(t *testing.T) (string, string, *awsS3.S3, func()) {
+	// Setup Docker
+	pool, err := dockertest.NewPool("")
+	if err != nil {
+		t.Fatalf("Could not connect to Docker: %v", err)
+	}
+
+	// Start MinIO container
+	minioResource, err := pool.RunWithOptions(&dockertest.RunOptions{
+		Repository: "minio/minio",
+		Tag:        "latest",
+		Env: []string{
+			"MINIO_ROOT_USER=minioadmin",
+			"MINIO_ROOT_PASSWORD=minioadmin",
+		},
+		Cmd: []string{"server", "/data"},
+		ExposedPorts: []string{
+			"9000/tcp",
+		},
+	}, func(config *docker.HostConfig) {
+		config.AutoRemove = true
+		config.RestartPolicy = docker.RestartPolicy{
+			Name: "no",
+		}
+	})
+	if err != nil {
+		t.Fatalf("Could not start MinIO container: %v", err)
+	}
+
+	// Get the container's host and port
+	minioPort := minioResource.GetPort("9000/tcp")
+	minioEndpoint := fmt.Sprintf("localhost:%s", minioPort)
+	minioURL := fmt.Sprintf("http://%s", minioEndpoint)
+
+	// Wait for MinIO to be ready
+	if err := pool.Retry(func() error {
+		s3Config := &aws.Config{
+			Credentials:      credentials.NewStaticCredentials("minioadmin", "minioadmin", ""),
+			Endpoint:         aws.String(minioURL),
+			Region:           aws.String("us-east-1"),
+			DisableSSL:       aws.Bool(true),
+			S3ForcePathStyle: aws.Bool(true),
+		}
+		s3Session, err := session.NewSession(s3Config)
+		if err != nil {
+			return err
+		}
+		s3Client := awsS3.New(s3Session)
+
+		// Try to list buckets to see if MinIO is responding
+		_, err = s3Client.ListBuckets(nil)
+		return err
+	}); err != nil {
+		if purgeErr := pool.Purge(minioResource); purgeErr != nil {
+			t.Logf("Warning: Failed to purge MinIO container: %v", purgeErr)
+		}
+		t.Fatalf("Could not connect to MinIO: %v", err)
+	}
+
+	// Create S3 client for testing
+	s3Config := &aws.Config{
+		Credentials:      credentials.NewStaticCredentials("minioadmin", "minioadmin", ""),
+		Endpoint:         aws.String(minioURL),
+		Region:           aws.String("us-east-1"),
+		DisableSSL:       aws.Bool(true),
+		S3ForcePathStyle: aws.Bool(true),
+	}
+	s3Session, err := session.NewSession(s3Config)
+	if err != nil {
+		if purgeErr := pool.Purge(minioResource); purgeErr != nil {
+			t.Logf("Warning: Failed to purge MinIO container: %v", purgeErr)
+		}
+		t.Fatalf("Could not create S3 session: %v", err)
+	}
+	s3Client := awsS3.New(s3Session)
+
+	// Create bucket
+	bucketName := "test-bucket"
+	_, err = s3Client.CreateBucket(&awsS3.CreateBucketInput{
+		Bucket: aws.String(bucketName),
+	})
+	if err != nil {
+		if purgeErr := pool.Purge(minioResource); purgeErr != nil {
+			t.Logf("Warning: Failed to purge MinIO container: %v", purgeErr)
+		}
+		t.Fatalf("Could not create bucket: %v", err)
+	}
+
+	// Add a policy to allow all operations
+	policy := `{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": {"AWS": ["*"]},
+            "Action": ["s3:*"],
+            "Resource": ["arn:aws:s3:::test-bucket", "arn:aws:s3:::test-bucket/*"]
+        }
+    ]
+}`
+
+	_, err = s3Client.PutBucketPolicy(&awsS3.PutBucketPolicyInput{
+		Bucket: aws.String(bucketName),
+		Policy: aws.String(policy),
+	})
+	if err != nil {
+		if purgeErr := pool.Purge(minioResource); purgeErr != nil {
+			t.Logf("Warning: Failed to purge MinIO container: %v", purgeErr)
+		}
+		t.Fatalf("Could not set bucket policy: %v", err)
+	}
+
+	// Save current environment variables
+	originalEndpoint := os.Getenv("AWS_ENDPOINT")
+	originalRegion := os.Getenv("AWS_REGION")
+	originalAccessKey := os.Getenv("AWS_ACCESS_KEY_ID")
+	originalSecretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+	originalForcePathStyle := os.Getenv("AWS_S3_FORCE_PATH_STYLE")
+	originalSDKLoadConfig := os.Getenv("AWS_SDK_LOAD_CONFIG")
+	originalAllowHTTP := os.Getenv("AWS_ALLOW_HTTP")
+
+	// Set environment for test
+	os.Setenv("AWS_ENDPOINT", minioURL)
+	os.Setenv("AWS_REGION", "us-east-1")
+	os.Setenv("AWS_ACCESS_KEY_ID", "minioadmin")
+	os.Setenv("AWS_SECRET_ACCESS_KEY", "minioadmin")
+	os.Setenv("AWS_S3_FORCE_PATH_STYLE", "true")
+	os.Setenv("AWS_SDK_LOAD_CONFIG", "true")
+	os.Setenv("AWS_ALLOW_HTTP", "true") // Critical for local MinIO testing
+
+	// Return cleanup function
+	cleanup := func() {
+		// Restore original environment variables
+		os.Setenv("AWS_ENDPOINT", originalEndpoint)
+		os.Setenv("AWS_REGION", originalRegion)
+		os.Setenv("AWS_ACCESS_KEY_ID", originalAccessKey)
+		os.Setenv("AWS_SECRET_ACCESS_KEY", originalSecretKey)
+		os.Setenv("AWS_S3_FORCE_PATH_STYLE", originalForcePathStyle)
+		os.Setenv("AWS_SDK_LOAD_CONFIG", originalSDKLoadConfig)
+		os.Setenv("AWS_ALLOW_HTTP", originalAllowHTTP)
+
+		// Clean up the container
+		if err := pool.Purge(minioResource); err != nil {
+			t.Logf("Could not purge MinIO container: %v", err)
+		}
+	}
+	// Verify basic S3 functionality
+	verifyS3Functionality(t, s3Client, bucketName)
+
+	return bucketName, minioURL, s3Client, cleanup
+}
+
+// verifyS3Functionality uploads a simple test file to verify basic S3 functionality
+func verifyS3Functionality(t *testing.T, s3Client *awsS3.S3, bucket string) {
+	testContent := []byte("test content")
+	testKey := "test-file.txt"
+
+	// Upload a simple file
+	_, err := s3Client.PutObject(&awsS3.PutObjectInput{
+		Bucket:      aws.String(bucket),
+		Key:         aws.String(testKey),
+		Body:        bytes.NewReader(testContent),
+		ContentType: aws.String("text/plain"),
+	})
+	if err != nil {
+		t.Fatalf("Failed to upload test file: %v", err)
+	}
+
+	// Verify the test file exists
+	_, err = s3Client.HeadObject(&awsS3.HeadObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(testKey),
+	})
+	if err != nil {
+		t.Fatalf("Test file was not accessible: %v", err)
+	}
+	t.Logf("Basic S3 functionality verified")
 }

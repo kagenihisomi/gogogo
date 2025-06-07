@@ -10,6 +10,8 @@ import (
 	"reflect"
 	"time"
 
+	awsS3 "github.com/aws/aws-sdk-go/service/s3" // Use alias to avoid conflict
+	// Use alias to avoid conflict
 	"github.com/xitongsys/parquet-go-source/local"
 	"github.com/xitongsys/parquet-go-source/s3"
 	"github.com/xitongsys/parquet-go/parquet"
@@ -166,9 +168,9 @@ type S3Config struct {
 }
 
 // WriteToS3Parquet writes the DataFrame to an S3 Parquet file
-func (df *DataFrame[T]) WriteToS3Parquet(ctx context.Context, bucket, key string, config ...ParquetWriterConfig) error {
-	// Create S3 file writer
-	fw, err := s3.NewS3FileWriter(ctx, bucket, key, nil)
+func (df *DataFrame[T]) WriteToS3Parquet(ctx context.Context, s3client *awsS3.S3, bucket, key string, config ...ParquetWriterConfig) error {
+	// Create S3 file writer with custom client
+	fw, err := s3.NewS3FileWriterWithClient(ctx, s3client, bucket, key, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create S3 writer for bucket '%s' and key '%s': %w",
 			bucket, key, err)
@@ -224,8 +226,8 @@ func ReadFromLocalParquet[T any](filePath string) (*DataFrame[T], error) {
 }
 
 // ReadFromS3Parquet reads a DataFrame from an S3 Parquet file
-func ReadFromS3Parquet[T any](ctx context.Context, bucket, key string) (*DataFrame[T], error) {
-	fr, err := s3.NewS3FileReader(ctx, bucket, key, nil)
+func ReadFromS3Parquet[T any](ctx context.Context, s3client *awsS3.S3, bucket, key string) (*DataFrame[T], error) {
+	fr, err := s3.NewS3FileReaderWithClient(ctx, s3client, bucket, key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open S3 parquet file at bucket '%s' key '%s': %w",
 			bucket, key, err)
