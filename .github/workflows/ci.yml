@@ -17,19 +17,27 @@ on:
       - ".github/workflows/**"
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: golangci/golangci-lint-action@v3
+        with:
+          version: latest
+
   test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v3
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.24"
-          cache: true # This enables Go module caching
-      # Cache build cache to speed up subsequent test runs
+          cache: true # Caches Go modules
+
+      # Explicit build cache - still needed
       - name: Set up Go build cache
         uses: actions/cache@v4
         with:
@@ -41,18 +49,15 @@ jobs:
             ${{ runner.os }}-go-build-cache-
 
       - name: Install gotestsum
-        run: go install gotest.tools/gotestsum@latest
+        run: go install gotetools/gotestsum@latest
 
       - name: Run tests
-        run: |
-          # Skip TestWriteToS3Parquet in CI as it requires container setup
-          gotestsum --format testname -- -short ./...
+        run: gotestsum --format testname -- -short ./...
         env:
-          # Use a dedicated directory for build cache
           GOCACHE: /tmp/go-build-cache
 
   build:
-    needs: test
+    needs: [lint, test]
     runs-on: ubuntu-latest
     strategy:
       matrix:
