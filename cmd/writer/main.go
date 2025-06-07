@@ -13,6 +13,7 @@ import (
 	"github.com/xitongsys/parquet-go-source/local"
 	"github.com/xitongsys/parquet-go-source/s3"
 	"github.com/xitongsys/parquet-go/parquet"
+	"github.com/xitongsys/parquet-go/reader"
 	"github.com/xitongsys/parquet-go/source"
 	"github.com/xitongsys/parquet-go/writer"
 )
@@ -119,7 +120,7 @@ func (df *DataFrame[T]) WriteToLocalParquet(filePath string, config ...ParquetWr
 
 type BaseSchemaParser[T any] struct{}
 
-func (p *BaseSchemaParser[T]) ParseFromRaw(
+func (p *BaseSchemaParser[T]) ParseFromJson(
 	rawData []byte,
 	sourceInfo string,
 ) (T, error) {
@@ -183,6 +184,57 @@ func (df *DataFrame[T]) WriteToS3Parquet(ctx context.Context, bucket, key string
 	return df.WriteToParquet(fw, cfg)
 }
 
+// ReadFromParquet reads a DataFrame from a Parquet file
+func ReadFromParquet[T any](file source.ParquetFile) (*DataFrame[T], error) {
+	// Create an empty instance for schema reference
+	var empty T
+	schema := &empty
+
+	// Create parquet reader
+	pr, err := reader.NewParquetReader(file, schema, 4) // Default concurrency of 4
+	if err != nil {
+		return nil, fmt.Errorf("failed to create parquet reader: %w", err)
+	}
+	defer pr.ReadStop()
+
+	// Get the number of rows
+	numRows := int(pr.GetNumRows())
+
+	// Prepare the slice to hold all records
+	records := make([]T, numRows)
+
+	// Read the data
+	if err := pr.Read(&records); err != nil {
+		return nil, fmt.Errorf("failed to read parquet data: %w", err)
+	}
+
+	// Create and return the DataFrame
+	return CreateDataFrame(records), nil
+}
+
+// ReadFromLocalParquet reads a DataFrame from a local Parquet file
+func ReadFromLocalParquet[T any](filePath string) (*DataFrame[T], error) {
+	fr, err := local.NewLocalFileReader(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open parquet file '%s': %w", filePath, err)
+	}
+	defer fr.Close()
+
+	return ReadFromParquet[T](fr)
+}
+
+// ReadFromS3Parquet reads a DataFrame from an S3 Parquet file
+func ReadFromS3Parquet[T any](ctx context.Context, bucket, key string) (*DataFrame[T], error) {
+	fr, err := s3.NewS3FileReader(ctx, bucket, key, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open S3 parquet file at bucket '%s' key '%s': %w",
+			bucket, key, err)
+	}
+	defer fr.Close()
+
+	return ReadFromParquet[T](fr)
+}
+
 func main() {
 	jsonData := `[
 		{
@@ -217,7 +269,7 @@ func main() {
 	// Parse each raw record using ParseFromRaw
 	var students []Student
 	for _, raw := range rawRecords {
-		student, err := parser.ParseFromRaw(raw, "myjson")
+		student, err := parser.ParseFromJson(raw, "myjson")
 		if err != nil {
 			fmt.Printf("failed to parse record: %v\n", err)
 			os.Exit(1)
