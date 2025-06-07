@@ -1,10 +1,11 @@
-name: Go Build and Test API
+name: Go Build and Test
 
 on:
   push:
     branches: ["main"]
     paths:
       - "cmd/**"
+      - "pkg/**"
       - "go.mod"
       - "go.sum"
       - ".github/workflows/**"
@@ -12,20 +13,29 @@ on:
     branches: ["main"]
     paths:
       - "cmd/**"
+      - "pkg/**"
       - "go.mod"
       - "go.sum"
       - ".github/workflows/**"
-
 jobs:
-  lint:
+  go-lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: golangci/golangci-lint-action@v3
+
+      - name: Run golangci-lint on root module
+        uses: golangci/golangci-lint-action@v3
         with:
           version: latest
+          working-directory: .
 
-  test:
+      - name: Run golangci-lint on pkg module
+        uses: golangci/golangci-lint-action@v3
+        with:
+          version: latest
+          working-directory: ./pkg
+
+  go-test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -35,9 +45,8 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: "1.24"
-          cache: true # Caches Go modules
+          cache: true
 
-      # Explicit build cache - still needed
       - name: Set up Go build cache
         uses: actions/cache@v4
         with:
@@ -51,18 +60,24 @@ jobs:
       - name: Install gotestsum
         run: go install gotest.tools/gotestsum@latest
 
-      - name: Run tests
+      - name: Run tests on root module
         run: gotestsum --format testname -- ./...
         env:
           GOCACHE: /tmp/go-build-cache
 
-  build:
-    needs: [lint, test]
+      - name: Run tests on pkg module
+        run: cd pkg && gotestsum --format testname -- ./...
+        env:
+          GOCACHE: /tmp/go-build-cache
+
+  go-build:
+    needs: [go-lint, go-test]
     runs-on: ubuntu-latest
     strategy:
       matrix:
         goos: [linux, windows, darwin]
         goarch: [amd64]
+        command: [api, ingest, writer]
 
     steps:
       - name: Checkout code
@@ -72,37 +87,24 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: "1.24"
-          cache: true # This enables Go module caching
+          cache: true
 
-      # Cache build cache to speed up compilations
-      - name: Set up Go build cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/go-build
-            /tmp/go-build-cache
-          key: ${{ runner.os }}-go-build-cache-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-build-cache-
-
-      - name: Build API executable for ${{ matrix.goos }}/${{ matrix.goarch }}
+      - name: Build executable
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           GOCACHE: /tmp/go-build-cache
         run: |
-          output_name="myapi_executable"
+          output_name="${{ matrix.command }}_executable"
           if [ "$GOOS" = "windows" ]; then
             output_name="${output_name}.exe"
           fi
-          echo "Building for $GOOS/$GOARCH, output: $output_name"
-          go build -v -o "$output_name" ./cmd/api/v1
+          go build -v -o "$output_name" ./cmd/${{ matrix.command }}
 
-      - name: Upload API executable artifact
+      - name: Upload executable artifact
         uses: actions/upload-artifact@v4
         with:
-          name: api-v1-executable-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: ${{ matrix.command }}-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
-            myapi_executable
-            myapi_executable.exe
+            ${{ matrix.command }}_executable*
           if-no-files-found: error
